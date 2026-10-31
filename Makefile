@@ -16,7 +16,7 @@ MD_MRMP         := $(BUILD_DIR)/md-mrmp
 PD_TEACHING_SIMULATOR := $(BUILD_DIR)/pd-teaching-simulator
 MD_CONSOLE_SWITCH_DEMO := $(BUILD_DIR)/md-console-switch-demo
 PD_CONSOLE_TEMPERATURE_DEMO := $(BUILD_DIR)/pd-console-temperature-demo
-TRDP_ARCH        := osx_x86_64
+TRDP_ARCH        := linux
 TRDP_LIB         := $(TRDP_DIR)/bld/output/$(TRDP_ARCH)-rel/libtrdp.a
 
 CC              ?= cc
@@ -53,7 +53,7 @@ $(BUILD_DIR):
 
 # Build the upstream TRDP static library with a selected upstream profile.
 # Example: make trdp TRDP_CONFIG=OSX_X86_64_config
-TRDP_CONFIG ?= OSX_X86_64_config
+TRDP_CONFIG ?= LINUX_X86_64_config
 trdp:
 	$(MAKE) -C $(TRDP_DIR) $(TRDP_CONFIG)
 	$(MAKE) -C $(TRDP_DIR) SOA_SUPPORT=0 libtrdp
