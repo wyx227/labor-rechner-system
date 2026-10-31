@@ -1,302 +1,226 @@
-/* Interactive loopback PD temperature exploration demo. */
-
-#include <errno.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
-#include <termios.h>
-#include <time.h>
-#include <unistd.h>
 
 #include "pd_communication.h"
 #include "vos_utils.h"
 
-#define LOOPBACK_IP        "127.0.0.1"
-#define FIRST_COMID        1100u
-#define BOGIE_COUNT        4u
-#define UPDATE_INTERVAL_MS 500u
+#define PD_COMM_RESERVED_MEMORY 160000u
 
-typedef struct
+static TRDP_ERR_T pd_comm_require_open (const PD_COMM_T *communication)
 {
-    TRDP_PUB_T publisher;
-    UINT8 temperature;
-    BOOL8 overheat;
-} BOGIE_T;
-
-static volatile sig_atomic_t keep_running = 1;
-static struct termios saved_terminal;
-static int terminal_is_raw = 0;
-
-static void restore_terminal (void)
-{
-    if (terminal_is_raw != 0)
+    if (communication == NULL || communication->initialized == FALSE)
     {
-        (void) tcsetattr(STDIN_FILENO, TCSANOW, &saved_terminal);
-        terminal_is_raw = 0;
-    }
-}
-
-static void stop (int signal_number)
-{
-    (void) signal_number;
-    keep_running = 0;
-}
-
-static int configure_terminal (void)
-{
-    struct termios raw_terminal;
-
-    if (tcgetattr(STDIN_FILENO, &saved_terminal) != 0)
-    {
-        return 0;
-    }
-    raw_terminal = saved_terminal;
-    raw_terminal.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
-    raw_terminal.c_cc[VMIN] = 0;
-    raw_terminal.c_cc[VTIME] = 0;
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw_terminal) != 0)
-    {
-        return 0;
-    }
-    terminal_is_raw = 1;
-    return 1;
-}
-
-static int clamp (int value, int low, int high)
-{
-    return value < low ? low : (value > high ? high : value);
-}
-
-static void advance_temperature (BOGIE_T *bogie)
-{
-    int temperature = bogie->temperature;
-    int change;
-
-    if (bogie->overheat == TRUE)
-    {
-        /* The event becomes visible through a gradual, not instantaneous, rise. */
-        if (temperature < 125)
-        {
-            temperature += 2 + rand() % 4;
-        }
-        else
-        {
-            change = (rand() % 5) - 2;
-            temperature = clamp(temperature + change, 121, 180);
-        }
-    }
-    else if (temperature > 90)
-    {
-        temperature -= 1 + rand() % 3;
-    }
-    else
-    {
-        change = (rand() % 5) - 2;
-        temperature = clamp(temperature + change, 35, 95);
-    }
-    bogie->temperature = (UINT8) clamp(temperature, 0, 255);
-}
-
-static void draw_state (const BOGIE_T bogies[BOGIE_COUNT])
-{
-    UINT32 index;
-
-    printf("\033[2J\033[H");
-    printf("PD temperature exploration demo (127.0.0.1:17224)\n\n");
-    printf("ComID   Drehgestell   actTemp   overheat\n");
-    for (index = 0u; index < BOGIE_COUNT; ++index)
-    {
-        printf("%5u   %11u   %3u C    %s\n", FIRST_COMID + index, index + 1u,
-               bogies[index].temperature, bogies[index].overheat == TRUE ? "ON" : "off");
-    }
-    printf("\nF1-F4: toggle overheat for Drehgestell 1-4    q: quit\n");
-    fflush(stdout);
-}
-
-static TRDP_ERR_T create_publishers (PD_COMM_T *communication, BOGIE_T bogies[BOGIE_COUNT])
-{
-    UINT32 index;
-    TRDP_IP_ADDR_T destination = vos_dottedIP(LOOPBACK_IP);
-    TRDP_ERR_T error;
-
-    for (index = 0u; index < BOGIE_COUNT; ++index)
-    {
-        error = tlp_publish(communication->session, &bogies[index].publisher,
-                            NULL, NULL, 0u, FIRST_COMID + index, 0u, 0u,
-                            communication->config.source_ip, destination,
-                            PD_COMM_DEFAULT_CYCLE_US, 0u, TRDP_FLAGS_NONE,
-                            &bogies[index].temperature, sizeof(bogies[index].temperature));
-        if (error != TRDP_NO_ERR)
-        {
-            return error;
-        }
-    }
-    return tlc_updateSession(communication->session);
-}
-
-static void destroy_publishers (PD_COMM_T *communication, const BOGIE_T bogies[BOGIE_COUNT])
-{
-    UINT32 index;
-
-    for (index = 0u; index < BOGIE_COUNT; ++index)
-    {
-        (void) tlp_unpublish(communication->session, bogies[index].publisher);
-    }
-}
-
-static TRDP_ERR_T publish_temperatures (PD_COMM_T *communication, const BOGIE_T bogies[BOGIE_COUNT])
-{
-    UINT32 index;
-    TRDP_ERR_T error;
-
-    for (index = 0u; index < BOGIE_COUNT; ++index)
-    {
-        error = tlp_put(communication->session, bogies[index].publisher,
-                        &bogies[index].temperature, sizeof(bogies[index].temperature));
-        if (error != TRDP_NO_ERR)
-        {
-            return error;
-        }
+        return TRDP_PARAM_ERR;
     }
     return TRDP_NO_ERR;
 }
 
-/* Recognise common xterm/VT and macOS terminal F1-F4 escape sequences. */
-static int read_console_action (void)
+void pd_comm_config_init (PD_COMM_CONFIG_T *config)
 {
-    static char sequence[8];
-    static size_t sequence_length = 0u;
-    char input[32];
-    ssize_t count;
-    ssize_t index;
-
-    count = read(STDIN_FILENO, input, sizeof(input));
-    if (count <= 0)
+    if (config == NULL)
     {
-        return 0;
+        return;
     }
-    for (index = 0; index < count; ++index)
-    {
-        char character = input[index];
 
-        if (sequence_length == 0u && character == 'q')
-        {
-            return 5;
-        }
-        if (sequence_length < sizeof(sequence) - 1u)
-        {
-            sequence[sequence_length++] = character;
-            sequence[sequence_length] = '\0';
-        }
-        else
-        {
-            sequence_length = 0u;
-        }
-        if (strcmp(sequence, "\033OP") == 0 || strcmp(sequence, "\033[11~") == 0)
-        {
-            sequence_length = 0u;
-            return 1;
-        }
-        if (strcmp(sequence, "\033OQ") == 0 || strcmp(sequence, "\033[12~") == 0)
-        {
-            sequence_length = 0u;
-            return 2;
-        }
-        if (strcmp(sequence, "\033OR") == 0 || strcmp(sequence, "\033[13~") == 0)
-        {
-            sequence_length = 0u;
-            return 3;
-        }
-        if (strcmp(sequence, "\033OS") == 0 || strcmp(sequence, "\033[14~") == 0)
-        {
-            sequence_length = 0u;
-            return 4;
-        }
-        if (sequence[0] != '\033' || sequence_length >= 5u)
-        {
-            sequence_length = 0u;
-        }
-    }
-    return 0;
+    config->comid = 0u;
+    config->use_udp = TRUE;
+    config->destination_ip = 0u;
+    config->source_ip = 0u;
+    config->cycle_us = PD_COMM_DEFAULT_CYCLE_US;
+    config->timeout_us = PD_COMM_DEFAULT_TIMEOUT_US;
 }
 
-int main (void)
+void pd_comm_config_set_comid (PD_COMM_CONFIG_T *config, UINT32 comid)
 {
-    BOGIE_T bogies[BOGIE_COUNT] = {
-        {NULL, 68u, FALSE}, {NULL, 71u, FALSE}, {NULL, 66u, FALSE}, {NULL, 73u, FALSE}
-    };
-    PD_COMM_CONFIG_T config;
-    PD_COMM_T communication;
+    if (config != NULL)
+    {
+        config->comid = comid;
+    }
+}
+
+TRDP_ERR_T pd_comm_config_set_udp (PD_COMM_CONFIG_T *config, BOOL8 use_udp)
+{
+    if (config == NULL || use_udp == FALSE)
+    {
+        return TRDP_PARAM_ERR;
+    }
+
+    config->use_udp = TRUE;
+    return TRDP_NO_ERR;
+}
+
+static TRDP_ERR_T pd_comm_set_ip (TRDP_IP_ADDR_T *target, const CHAR8 *address)
+{
+    TRDP_IP_ADDR_T parsed;
+
+    if (target == NULL || address == NULL || *address == '\0')
+    {
+        return TRDP_PARAM_ERR;
+    }
+
+    parsed = vos_dottedIP(address);
+    if (parsed == 0u && strcmp(address, "0.0.0.0") != 0)
+    {
+        return TRDP_PARAM_ERR;
+    }
+
+    *target = parsed;
+    return TRDP_NO_ERR;
+}
+
+TRDP_ERR_T pd_comm_config_set_destination_ip (PD_COMM_CONFIG_T *config, const CHAR8 *address)
+{
+    return config == NULL ? TRDP_PARAM_ERR : pd_comm_set_ip(&config->destination_ip, address);
+}
+
+TRDP_ERR_T pd_comm_config_set_source_ip (PD_COMM_CONFIG_T *config, const CHAR8 *address)
+{
+    return config == NULL ? TRDP_PARAM_ERR : pd_comm_set_ip(&config->source_ip, address);
+}
+
+TRDP_ERR_T pd_comm_open (PD_COMM_T *communication, const PD_COMM_CONFIG_T *config)
+{
+    TRDP_MEM_CONFIG_T memory_config = {NULL, PD_COMM_RESERVED_MEMORY, {0u}};
+    TRDP_PD_CONFIG_T pd_config = {NULL, NULL, TRDP_PD_DEFAULT_SEND_PARAM,
+                                  TRDP_FLAGS_NONE, 1000000u, TRDP_TO_SET_TO_ZERO, 0u};
+    TRDP_PROCESS_CONFIG_T process_config = {"pd-comm", "", "",
+                                            TRDP_PROCESS_DEFAULT_CYCLE_TIME, 0u,
+                                            TRDP_OPTION_BLOCK, 0u};
     TRDP_ERR_T error;
 
-    if (!configure_terminal())
+    if (communication == NULL || config == NULL || config->use_udp == FALSE)
     {
-        fprintf(stderr, "This demo requires an interactive terminal: %s\n", strerror(errno));
-        return 1;
+        return TRDP_PARAM_ERR;
     }
-    atexit(restore_terminal);
-    signal(SIGINT, stop);
-    signal(SIGTERM, stop);
-    srand((unsigned int) (time(NULL) ^ (time_t) getpid()));
 
-    pd_comm_config_init(&config);
-    error = pd_comm_open(&communication, &config);
-    if (error == TRDP_NO_ERR)
-    {
-        error = create_publishers(&communication, bogies);
-    }
+    memset(communication, 0, sizeof(*communication));
+    error = tlc_init(NULL, NULL, &memory_config);
     if (error != TRDP_NO_ERR)
     {
-        restore_terminal();
-        fprintf(stderr, "PD setup failed: %s\n", vos_getErrorString((VOS_ERR_T) error));
-        pd_comm_close(&communication);
-        return 1;
+        return error;
     }
 
-    draw_state(bogies);
-    while (keep_running)
+    error = tlc_openSession(&communication->session, config->source_ip, 0u,
+                            NULL, &pd_config, NULL, &process_config);
+    if (error != TRDP_NO_ERR)
     {
-        struct timeval timeout = {0, UPDATE_INTERVAL_MS * 1000u};
-        fd_set input_fds;
-        int action;
-        UINT32 index;
-
-        FD_ZERO(&input_fds);
-        FD_SET(STDIN_FILENO, &input_fds);
-        (void) select(STDIN_FILENO + 1, &input_fds, NULL, NULL, &timeout);
-        action = FD_ISSET(STDIN_FILENO, &input_fds) ? read_console_action() : 0;
-        if (action >= 1 && action <= 4)
-        {
-            index = (UINT32) (action - 1);
-            bogies[index].overheat = bogies[index].overheat == TRUE ? FALSE : TRUE;
-        }
-        else if (action == 5)
-        {
-            keep_running = 0;
-        }
-
-        for (index = 0u; index < BOGIE_COUNT; ++index)
-        {
-            advance_temperature(&bogies[index]);
-        }
-        draw_state(bogies);
-        error = publish_temperatures(&communication, bogies);
-        if (error != TRDP_NO_ERR)
-        {
-            fprintf(stderr, "PD update failed: %s\n", vos_getErrorString((VOS_ERR_T) error));
-            break;
-        }
-        error = pd_comm_process(&communication);
-        if (error != TRDP_NO_ERR)
-        {
-            fprintf(stderr, "PD process failed: %s\n", vos_getErrorString((VOS_ERR_T) error));
-            break;
-        }
+        tlc_terminate();
+        return error;
     }
 
-    destroy_publishers(&communication, bogies);
-    pd_comm_close(&communication);
-    return error == TRDP_NO_ERR ? 0 : 1;
+    communication->config = *config;
+    communication->initialized = TRUE;
+    return TRDP_NO_ERR;
+}
+
+TRDP_ERR_T pd_comm_open_publisher (PD_COMM_T *communication,
+                                   const UINT8 *initial_data,
+                                   UINT32 initial_size)
+{
+    TRDP_ERR_T error = pd_comm_require_open(communication);
+
+    if (error != TRDP_NO_ERR || communication->publisher_open == TRUE ||
+        communication->subscriber_open == TRUE || communication->config.destination_ip == 0u)
+    {
+        return TRDP_PARAM_ERR;
+    }
+
+    error = tlp_publish(communication->session, &communication->publisher,
+                        NULL, NULL, 0u, communication->config.comid, 0u, 0u,
+                        communication->config.source_ip, communication->config.destination_ip,
+                        communication->config.cycle_us, 0u, TRDP_FLAGS_NONE,
+                        initial_data, initial_size);
+    if (error != TRDP_NO_ERR)
+    {
+        return error;
+    }
+
+    error = tlc_updateSession(communication->session);
+    if (error != TRDP_NO_ERR)
+    {
+        (void) tlp_unpublish(communication->session, communication->publisher);
+        return error;
+    }
+    communication->publisher_open = TRUE;
+    return TRDP_NO_ERR;
+}
+
+TRDP_ERR_T pd_comm_open_subscriber (PD_COMM_T *communication)
+{
+    TRDP_ERR_T error = pd_comm_require_open(communication);
+
+    if (error != TRDP_NO_ERR || communication->publisher_open == TRUE ||
+        communication->subscriber_open == TRUE)
+    {
+        return TRDP_PARAM_ERR;
+    }
+
+    error = tlp_subscribe(communication->session, &communication->subscriber,
+                          NULL, NULL, 0u, communication->config.comid, 0u, 0u,
+                          communication->config.source_ip, VOS_INADDR_ANY,
+                          communication->config.destination_ip, TRDP_FLAGS_NONE,
+                          communication->config.timeout_us, TRDP_TO_SET_TO_ZERO);
+    if (error != TRDP_NO_ERR)
+    {
+        return error;
+    }
+
+    error = tlc_updateSession(communication->session);
+    if (error != TRDP_NO_ERR)
+    {
+        (void) tlp_unsubscribe(communication->session, communication->subscriber);
+        return error;
+    }
+    communication->subscriber_open = TRUE;
+    return TRDP_NO_ERR;
+}
+
+TRDP_ERR_T pd_comm_send (PD_COMM_T *communication, const UINT8 *data, UINT32 size)
+{
+    if (pd_comm_require_open(communication) != TRDP_NO_ERR || communication->publisher_open == FALSE)
+    {
+        return TRDP_PARAM_ERR;
+    }
+    return tlp_put(communication->session, communication->publisher, data, size);
+}
+
+TRDP_ERR_T pd_comm_receive (PD_COMM_T *communication,
+                            TRDP_PD_INFO_T *info,
+                            UINT8 *data,
+                            UINT32 *size)
+{
+    if (pd_comm_require_open(communication) != TRDP_NO_ERR || communication->subscriber_open == FALSE ||
+        info == NULL || data == NULL || size == NULL)
+    {
+        return TRDP_PARAM_ERR;
+    }
+    return tlp_get(communication->session, communication->subscriber, info, data, size);
+}
+
+TRDP_ERR_T pd_comm_process (PD_COMM_T *communication)
+{
+    if (pd_comm_require_open(communication) != TRDP_NO_ERR)
+    {
+        return TRDP_PARAM_ERR;
+    }
+    return tlc_process(communication->session, NULL, NULL);
+}
+
+void pd_comm_close (PD_COMM_T *communication)
+{
+    if (communication == NULL || communication->initialized == FALSE)
+    {
+        return;
+    }
+
+    if (communication->publisher_open == TRUE)
+    {
+        (void) tlp_unpublish(communication->session, communication->publisher);
+    }
+    if (communication->subscriber_open == TRUE)
+    {
+        (void) tlp_unsubscribe(communication->session, communication->subscriber);
+    }
+    (void) tlc_closeSession(communication->session);
+    tlc_terminate();
+    memset(communication, 0, sizeof(*communication));
 }
