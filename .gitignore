@@ -1,0 +1,4 @@
+build/
+trdp-src/trdp/bld
+.vscode/
+trdp-src/trdp/.vscode/
