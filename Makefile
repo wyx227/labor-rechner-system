@@ -13,9 +13,6 @@ MD_NOTIFICATION := $(BUILD_DIR)/md-notification
 MD_NOTIFICATION_RECEIVER := $(BUILD_DIR)/md-notification-receiver
 SEND_DIAG_DATA	:= $(BUILD_DIR)/send_diag_data
 MD_MRMP         := $(BUILD_DIR)/md-mrmp
-PD_TEACHING_SIMULATOR := $(BUILD_DIR)/pd-teaching-simulator
-MD_CONSOLE_SWITCH_DEMO := $(BUILD_DIR)/md-console-switch-demo
-PD_CONSOLE_TEMPERATURE_DEMO := $(BUILD_DIR)/pd-console-temperature-demo
 TRDP_ARCH        := linux
 TRDP_LIB         := $(TRDP_DIR)/bld/output/$(TRDP_ARCH)-rel/libtrdp.a
 
@@ -95,6 +92,7 @@ $(MD_MRMP): trdp $(TARGET) src/md_mrmp.c | $(BUILD_DIR)
 
 clean:
 	rm -rf $(BUILD_DIR)
+	rm -rf $(TRDP_DIR)/bld
 
 help:
 	@echo "make              Build src/ into $(TARGET)"
