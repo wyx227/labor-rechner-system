@@ -198,11 +198,25 @@ TRDP_ERR_T pd_comm_receive (PD_COMM_T *communication,
 
 TRDP_ERR_T pd_comm_process (PD_COMM_T *communication)
 {
+    TRDP_FDS_T file_descriptors;
+    TRDP_TIME_T interval;
+    TRDP_SOCK_T no_descriptors = VOS_INVALID_SOCKET;
+    INT32 ready_descriptors;
+    TRDP_ERR_T error;
+
     if (pd_comm_require_open(communication) != TRDP_NO_ERR)
     {
         return TRDP_PARAM_ERR;
     }
-    return tlc_process(communication->session, NULL, NULL);
+
+    FD_ZERO(&file_descriptors);
+    error = tlc_getInterval(communication->session, &interval, &file_descriptors, &no_descriptors);
+    if (error != TRDP_NO_ERR)
+    {
+        return error;
+    }
+    ready_descriptors = vos_select(no_descriptors, &file_descriptors, NULL, NULL, &interval);
+    return tlc_process(communication->session, &file_descriptors, &ready_descriptors);
 }
 
 void pd_comm_close (PD_COMM_T *communication)

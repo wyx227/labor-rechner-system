@@ -50,7 +50,7 @@ $(BUILD_DIR):
 
 # Build the upstream TRDP static library with a selected upstream profile.
 # Example: make trdp TRDP_CONFIG=OSX_X86_64_config
-TRDP_CONFIG ?= LINUX_X86_64_config
+TRDP_CONFIG ?= LINUX_config
 trdp:
 	$(MAKE) -C $(TRDP_DIR) $(TRDP_CONFIG)
 	$(MAKE) -C $(TRDP_DIR) SOA_SUPPORT=0 libtrdp
